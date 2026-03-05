@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<title>🍺 Golf Paripelilaskuri</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<!-- Firebase -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, onValue, set } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBJT9AKLkBPZgToSiGjx0SCTlvTEF8JuBU",
+    authDomain: "golf-paripelilaskuri.firebaseapp.com",
+    databaseURL: "https://golf-paripelilaskuri-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId: "golf-paripelilaskuri",
+    storageBucket: "golf-paripelilaskuri.firebasestorage.app",
+    messagingSenderId: "288363886210",
+    appId: "1:288363886210:web:97302a2f40ffc9423e669b"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+  const dataRef = ref(db, "golf/v1");
+
+  // Expose Firebase to React app via window
+  window._firebase = {
+    subscribe: (cb) => onValue(dataRef, snap => cb(snap.val())),
+    save: (data) => set(dataRef, data)
+  };
+  window._firebaseReady = true;
+  window.dispatchEvent(new Event("firebaseReady"));
+</script>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:#0d1117}
+  #root{height:100%}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ── Firebase bridge ───────────────────────────────────────────────────────────
+function subscribeToData(cb) {
+  if (window._firebaseReady) {
+    return window._firebase.subscribe(cb);
+  }
+  const handler = () => window._firebase.subscribe(cb);
+  window.addEventListener("firebaseReady", handler, { once: true });
+  return () => window.removeEventListener("firebaseReady", handler);
+}
+
+function saveToFirebase(data) {
+  if (window._firebaseReady) return window._firebase.save(data);
+  return Promise.resolve();
+}
+
+// ── Default state ─────────────────────────────────────────────────────────────
+const DEFAULT_STATE = { players: [], matches: [] };
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
+function fmt(d) { if(!d)return""; return new Date(d).toLocaleDateString("fi-FI"); }
+
+function seedForMatch(m) {
+  const str=(m.id||"")+(m.date||"")+(m.a1||"")+(m.a2||"")+(m.b1||"")+(m.b2||"")+(m.winner||"");
+  let h=0; for(let i=0;i<str.length;i++) h=(h*31+str.charCodeAt(i))|0; return Math.abs(h);
+}
+
+function computeStats(players, matches) {
+  const stats={};
+  for(const p of players) stats[p]={games:0,wins:0,losses:0,debt:0,received:0};
+  for(const m of matches) {
+    if(!m.winner) continue;
+    const winners=m.winner==="A"?[m.a1,m.a2]:[m.b1,m.b2];
+    const losers=m.winner==="A"?[m.b1,m.b2]:[m.a1,m.a2];
+    for(const p of [...winners,...losers]) if(stats[p]) stats[p].games++;
+    for(const p of winners) if(stats[p]) stats[p].wins++;
+    for(const p of losers)  if(stats[p]) stats[p].losses++;
+    const seed=seedForMatch(m);
+    const [l1,l2]=losers, h1=seed%2===0?winners[0]:winners[1], h2=seed%2===0?winners[1]:winners[0];
+    if(!m.paidH1&&l1&&h1){if(stats[l1])stats[l1].debt++;if(stats[h1])stats[h1].received++;}
+    if(!m.paidH2&&l2&&h2){if(stats[l2])stats[l2].debt++;if(stats[h2])stats[h2].received++;}
+  }
+  return stats;
+}
+
+function rankPlayers(players, stats) {
+  return [...players].sort((a,b)=>{
+    const sa=stats[a]||{},sb=stats[b]||{};
+    if((sb.wins||0)!==(sa.wins||0)) return (sb.wins||0)-(sa.wins||0);
+    const pa=sa.games?sa.wins/sa.games:0, pb=sb.games?sb.wins/sb.games:0;
+    return pb-pa;
+  });
+}
+
+function computePartnerStats(player, matches) {
+  const p={};
+  for(const m of matches){
+    if(!m.winner) continue;
+    const tA=[m.a1,m.a2],tB=[m.b1,m.b2];
+    const mt=tA.includes(player)?"A":tB.includes(player)?"B":null; if(!mt) continue;
+    const partner=(mt==="A"?tA:tB).find(x=>x!==player); if(!partner) continue;
+    if(!p[partner]) p[partner]={games:0,wins:0};
+    p[partner].games++; if(m.winner===mt) p[partner].wins++;
+  }
+  return p;
+}
+
+function computeOpponentStats(player, matches) {
+  const o={};
+  for(const m of matches){
+    if(!m.winner) continue;
+    const tA=[m.a1,m.a2],tB=[m.b1,m.b2];
+    const mt=tA.includes(player)?"A":tB.includes(player)?"B":null; if(!mt) continue;
+    const opps=mt==="A"?tB:tA;
+    for(const opp of opps){
+      if(!o[opp]) o[opp]={games:0,wins:0};
+      o[opp].games++; if(m.winner===mt) o[opp].wins++;
+    }
+  }
+  return o;
+}
+
+function computeMonthlyTrend(player, matches) {
+  const now=new Date(), months=[];
+  for(let i=5;i>=0;i--){
+    const d=new Date(now.getFullYear(),now.getMonth()-i,1);
+    months.push({year:d.getFullYear(),month:d.getMonth(),wins:0,games:0,label:d.toLocaleDateString("fi-FI",{month:"short"})});
+  }
+  for(const m of matches){
+    if(!m.winner||!m.date) continue;
+    const d=new Date(m.date);
+    const idx=months.findIndex(mo=>mo.year===d.getFullYear()&&mo.month===d.getMonth()); if(idx===-1) continue;
+    const mt=[m.a1,m.a2].includes(player)?"A":[m.b1,m.b2].includes(player)?"B":null; if(!mt) continue;
+    months[idx].games++; if(m.winner===mt) months[idx].wins++;
+  }
+  return months;
+}
+
+// ── Icons ─────────────────────────────────────────────────────────────────────
+const Icon=({name,size=20})=>{
+  const icons={
+    golf:<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="19" r="2"/><path d="M9 17V5l11-2v12"/><circle cx="20" cy="15" r="2"/></svg>,
+    plus:<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+    trophy:<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>,
+    beer:<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 11h1a3 3 0 0 1 0 6h-1"/><path d="M9 12v6"/><path d="M13 12v6"/><path d="M14 7.5c-1 0-1.44.5-3 .5s-2-.5-3-.5-1.44.5-3 .5"/><path d="M3 7.5C3 6.12 3.88 5 5 5h14c1.12 0 2 1.12 2 2.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7.5z"/></svg>,
+    users:<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+    check:<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>,
+    trash:<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>,
+    back:<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg>,
+    x:<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
+  };
+  return icons[name]||null;
+};
+
+// ── Sparkline ─────────────────────────────────────────────────────────────────
+function Sparkline({data,width=120,height=36}){
+  if(!data||data.every(d=>d.games===0)) return <span style={{color:"var(--text3)",fontSize:12}}>–</span>;
+  const vals=data.map(d=>d.games>0?d.wins/d.games:null);
+  const defined=vals.filter(v=>v!==null);
+  if(defined.length<2) return <span style={{color:"var(--text3)",fontSize:12}}>–</span>;
+  const pad=4,w=width-pad*2,h=height-pad*2;
+  const points=vals.map((v,i)=>({x:pad+(i/(vals.length-1))*w,y:v===null?null:pad+(1-v)*h,v}));
+  let d="";
+  points.forEach((p,i)=>{
+    if(p.y===null)return;
+    const prev=points.slice(0,i).reverse().find(pp=>pp.y!==null);
+    d+=prev?` L${p.x},${p.y}`:`M${p.x},${p.y}`;
+  });
+  const last=points.filter(p=>p.y!==null).pop();
+  return(
+    <svg width={width} height={height} style={{overflow:"visible"}}>
+      <path d={d} fill="none" stroke="var(--green)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+      {last&&<circle cx={last.x} cy={last.y} r="3" fill="var(--green)"/>}
+      {points.map((p,i)=>p.y!==null&&<circle key={i} cx={p.x} cy={p.y} r="2" fill="var(--bg)" stroke="var(--green)" strokeWidth="1.5"/>)}
+    </svg>
+  );
+}
+
+// ── Styles ────────────────────────────────────────────────────────────────────
+const styles=`
+  @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap');
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2330;--border:#30363d;--green:#3fb950;--green-dim:#1a3a22;--red:#f85149;--red-dim:#3a1a1a;--gold:#e3b341;--gold-dim:#3a2e0a;--blue:#58a6ff;--blue-dim:#0d2340;--text:#e6edf3;--text2:#8b949e;--text3:#484f58;--radius:12px;--radius-sm:8px}
+  body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;font-size:15px;line-height:1.5}
+  .app{max-width:480px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column}
+  .header{background:var(--surface);border-bottom:1px solid var(--border);padding:14px 16px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:100}
+  .header-title{font-family:'Syne',sans-serif;font-weight:800;font-size:17px;letter-spacing:-0.3px;flex:1}
+  .nav{display:grid;grid-template-columns:repeat(4,1fr);background:var(--surface);border-top:1px solid var(--border);position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;z-index:100}
+  .nav-btn{background:none;border:none;color:var(--text3);cursor:pointer;padding:10px 4px 12px;display:flex;flex-direction:column;align-items:center;gap:4px;font-family:'DM Sans',sans-serif;font-size:10px;font-weight:500;letter-spacing:0.3px;text-transform:uppercase;transition:color .15s}
+  .nav-btn.active{color:var(--green)}
+  .content{flex:1;padding:20px 16px 90px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:12px}
+  .card-title{font-family:'Syne',sans-serif;font-weight:700;font-size:13px;text-transform:uppercase;letter-spacing:0.8px;color:var(--text2);margin-bottom:12px}
+  .section-head{font-family:'Syne',sans-serif;font-weight:800;font-size:22px;margin-bottom:16px;letter-spacing:-0.5px}
+  .section-sub{color:var(--text2);font-size:13px;margin-top:-10px;margin-bottom:16px}
+  .stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+  .stat-box{background:var(--surface2);border-radius:var(--radius-sm);padding:12px 10px;text-align:center}
+  .stat-val{font-family:'Syne',sans-serif;font-weight:800;font-size:24px;line-height:1}
+  .stat-lbl{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-top:4px}
+  .stat-val.green{color:var(--green)}.stat-val.red{color:var(--red)}.stat-val.gold{color:var(--gold)}
+  .rank-item{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)}
+  .rank-item:last-child{border-bottom:none}
+  .rank-item.clickable{cursor:pointer;border-radius:var(--radius-sm);margin:0 -8px;padding:10px 8px;transition:background .12s}
+  .rank-item.clickable:hover{background:var(--surface2)}
+  .rank-num{font-family:'Syne',sans-serif;font-weight:800;font-size:14px;color:var(--text3);width:22px;text-align:center;flex-shrink:0}
+  .rank-name{font-weight:500;flex:1}.rank-stats{font-size:12px;color:var(--text2)}
+  .rank-winpct{font-family:'Syne',sans-serif;font-weight:700;font-size:15px;color:var(--green)}
+  .match-item{background:var(--surface2);border-radius:var(--radius-sm);padding:12px;margin-bottom:8px}
+  .match-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .match-date{font-size:12px;color:var(--text2)}
+  .match-winner-badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px}
+  .match-winner-badge.A{background:var(--green-dim);color:var(--green)}
+  .match-winner-badge.B{background:var(--blue-dim);color:var(--blue)}
+  .match-teams{display:grid;grid-template-columns:1fr auto 1fr;gap:8px;align-items:center}
+  .match-team{text-align:center}
+  .match-team-label{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px}
+  .match-team-names{font-size:13px;font-weight:500;line-height:1.4}
+  .match-team.winner .match-team-names{color:var(--green)}
+  .match-vs{font-family:'Syne',sans-serif;font-weight:800;font-size:13px;color:var(--text3)}
+  .match-beer{margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;gap:8px}
+  .beer-row{flex:1;background:var(--surface);border-radius:6px;padding:6px 8px;display:flex;align-items:center;justify-content:space-between;gap:4px}
+  .beer-text{font-size:11px;color:var(--text2);flex:1;line-height:1.3}
+  .beer-text strong{color:var(--text);display:block}
+  .beer-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--text2);cursor:pointer;padding:4px 6px;display:flex;align-items:center;transition:all .15s;flex-shrink:0}
+  .beer-btn.paid{background:var(--green-dim);border-color:var(--green);color:var(--green)}
+  .form-group{margin-bottom:14px}
+  .form-label{font-size:12px;font-weight:500;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:6px}
+  .form-input{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-family:'DM Sans',sans-serif;font-size:15px;padding:10px 12px;outline:none;transition:border-color .15s}
+  .form-input:focus{border-color:var(--green)}
+  .form-select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238b949e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px}
+  .form-grid-2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .winner-toggle{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .winner-opt{border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;text-align:center;cursor:pointer;transition:all .15s;font-size:13px;font-weight:500}
+  .winner-opt.A.selected{background:var(--green-dim);border-color:var(--green);color:var(--green)}
+  .winner-opt.B.selected{background:var(--blue-dim);border-color:var(--blue);color:var(--blue)}
+  .winner-opt:not(.selected){color:var(--text2)}
+  .btn{display:flex;align-items:center;justify-content:center;gap:8px;border:none;border-radius:var(--radius-sm);cursor:pointer;font-family:'DM Sans',sans-serif;font-weight:500;font-size:15px;padding:12px 20px;transition:all .15s;width:100%}
+  .btn-primary{background:var(--green);color:#0d1117}
+  .btn-primary:hover{filter:brightness(1.1)}
+  .btn-secondary{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
+  .btn-danger{background:var(--red-dim);color:var(--red);border:1px solid var(--red)}
+  .btn:disabled{opacity:0.4;cursor:not-allowed}
+  .player-chip{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:var(--surface2);border-radius:var(--radius-sm);margin-bottom:8px}
+  .player-chip-name{font-weight:500}
+  .player-chip-del{background:none;border:none;color:var(--text3);cursor:pointer;padding:2px;display:flex;align-items:center;transition:color .15s}
+  .player-chip-del:hover{color:var(--red)}
+  .beer-table{width:100%;border-collapse:collapse}
+  .beer-table th{font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;padding:6px 8px;text-align:left;border-bottom:1px solid var(--border)}
+  .beer-table td{padding:10px 8px;border-bottom:1px solid var(--border);font-size:14px}
+  .beer-table tr:last-child td{border-bottom:none}
+  .debt-badge{display:inline-block;background:var(--red-dim);color:var(--red);border-radius:20px;padding:1px 8px;font-size:12px;font-weight:600}
+  .recv-badge{display:inline-block;background:var(--green-dim);color:var(--green);border-radius:20px;padding:1px 8px;font-size:12px;font-weight:600}
+  .net-pos{color:var(--green);font-weight:600}.net-neg{color:var(--red);font-weight:600}
+  .empty{text-align:center;padding:48px 20px;color:var(--text3)}
+  .empty-icon{margin-bottom:12px;opacity:0.4}.empty-text{font-size:14px}
+  .tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px}
+  .tag-green{background:var(--green-dim);color:var(--green)}.tag-red{background:var(--red-dim);color:var(--red)}
+  .divider{height:1px;background:var(--border);margin:14px 0}
+  .loading{display:flex;align-items:center;justify-content:center;height:60vh;color:var(--text2);font-size:16px;gap:10px;flex-direction:column}
+  .loading-sub{font-size:13px;color:var(--text3)}
+  .profile-hero{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px 16px;margin-bottom:12px;display:flex;align-items:center;gap:16px}
+  .profile-avatar{width:52px;height:52px;border-radius:50%;background:var(--green-dim);border:2px solid var(--green);display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:800;font-size:22px;color:var(--green);flex-shrink:0}
+  .profile-name{font-family:'Syne',sans-serif;font-weight:800;font-size:20px;letter-spacing:-0.3px}
+  .profile-rank{font-size:12px;color:var(--text2);margin-top:2px}
+  .duo-table{width:100%}
+  .duo-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)}
+  .duo-row:last-child{border-bottom:none}
+  .duo-name{flex:1;font-size:14px;font-weight:500}
+  .duo-bar-wrap{width:80px;height:6px;background:var(--surface2);border-radius:3px;overflow:hidden}
+  .duo-bar{height:100%;border-radius:3px;background:var(--green);transition:width .3s}
+  .duo-bar.red{background:var(--red)}
+  .duo-pct{font-family:'Syne',sans-serif;font-size:13px;font-weight:700;width:36px;text-align:right}
+  .duo-games{font-size:11px;color:var(--text3);width:32px;text-align:right}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spinner{width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--green);border-radius:50%;animation:spin .8s linear infinite}
+`;
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+function App() {
+  const [tab, setTab] = useState("ranking");
+  const [data, setDataRaw] = useState(null);
+  const [connected, setConnected] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [toast, setToast] = useState(null);
+  const isSaving = useRef(false);
+
+  // Subscribe to Firebase realtime updates
+  useEffect(() => {
+    const unsub = subscribeToData((remoteData) => {
+      setConnected(true);
+      if (!isSaving.current) {
+        setDataRaw(remoteData || { ...DEFAULT_STATE });
+      }
+    });
+    return () => typeof unsub === "function" && unsub();
+  }, []);
+
+  const setData = useCallback((updater) => {
+    setDataRaw(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      isSaving.current = true;
+      setSyncing(true);
+      saveToFirebase(next).then(() => {
+        setSyncing(false);
+        setTimeout(() => { isSaving.current = false; }, 500);
+      });
+      return next;
+    });
+  }, []);
+
+  const showToast = useCallback((msg) => {
+    setToast(msg); setTimeout(() => setToast(null), 2200);
+  }, []);
+
+  if (!data || !connected) return (
+    <>
+      <style>{styles}</style>
+      <div className="app">
+        <div className="loading">
+          <div className="spinner"/>
+          <span>🍺 Yhdistetään…</span>
+          <span className="loading-sub">Ladataan yhteistä dataa</span>
+        </div>
+      </div>
+    </>
+  );
+
+  const stats = computeStats(data.players, data.matches);
+  const tabs = [
+    {id:"ranking",label:"Ranking",icon:"trophy"},
+    {id:"matches",label:"Ottelut",icon:"golf"},
+    {id:"beers",label:"Oluet",icon:"beer"},
+    {id:"players",label:"Pelaajat",icon:"users"},
+  ];
+
+  return (
+    <>
+      <style>{styles}</style>
+      <div className="app">
+        <header className="header">
+          <span style={{fontSize:22}}>🍺</span>
+          <span className="header-title">Golf Paripelilaskuri</span>
+          <span style={{fontSize:11,color:syncing?"var(--gold)":"var(--green)",display:"flex",alignItems:"center",gap:4}}>
+            <span style={{width:7,height:7,borderRadius:"50%",background:syncing?"var(--gold)":"var(--green)",display:"inline-block",animation:syncing?"pulse 1s infinite":"none"}}/>
+            {syncing?"Tallennetaan…":"Live"}
+          </span>
+        </header>
+        <main className="content">
+          {tab==="ranking"&&<RankingTab data={data} stats={stats}/>}
+          {tab==="matches"&&<MatchesTab data={data} setData={setData} showToast={showToast}/>}
+          {tab==="beers"&&<BeersTab data={data} setData={setData} showToast={showToast} stats={stats}/>}
+          {tab==="players"&&<PlayersTab data={data} setData={setData} showToast={showToast}/>}
+        </main>
+        <nav className="nav">
+          {tabs.map(t=>(
+            <button key={t.id} className={`nav-btn ${tab===t.id?"active":""}`} onClick={()=>setTab(t.id)}>
+              <Icon name={t.icon} size={20}/>{t.label}
+            </button>
+          ))}
+        </nav>
+        {toast&&<div className="toast" style={{position:"fixed",bottom:80,left:"50%",transform:"translateX(-50%)",background:"var(--green)",color:"#0d1117",fontWeight:600,fontSize:14,padding:"10px 20px",borderRadius:30,zIndex:200,whiteSpace:"nowrap"}}>{toast}</div>}
+      </div>
+    </>
+  );
+}
+
+// ── Ranking Tab ───────────────────────────────────────────────────────────────
+function RankingTab({data,stats}){
+  const [sel,setSel]=useState(null);
+  if(sel) return <PlayerProfile player={sel} data={data} stats={stats} onBack={()=>setSel(null)}/>;
+  const ranked=rankPlayers(data.players,stats);
+  const totalMatches=data.matches.filter(m=>m.winner).length;
+  const unpaid=data.matches.reduce((a,m)=>{if(!m.winner)return a;if(!m.paidH1)a++;if(!m.paidH2)a++;return a;},0);
+  const allTime={};
+  for(const p of data.players) allTime[p]={debt:0,received:0};
+  for(const m of data.matches){
+    if(!m.winner) continue;
+    const w=m.winner==="A"?[m.a1,m.a2]:[m.b1,m.b2],l=m.winner==="A"?[m.b1,m.b2]:[m.a1,m.a2];
+    const s=seedForMatch(m),h1=s%2===0?w[0]:w[1],h2=s%2===0?w[1]:w[0];
+    if(l[0]&&allTime[l[0]])allTime[l[0]].debt++;if(h1&&allTime[h1])allTime[h1].received++;
+    if(l[1]&&allTime[l[1]])allTime[l[1]].debt++;if(h2&&allTime[h2])allTime[h2].received++;
+  }
+  if(data.players.length===0) return <div><div className="section-head">Ranking</div><div className="empty"><div className="empty-icon"><Icon name="trophy" size={40}/></div><div className="empty-text">Lisää pelaajia Pelaajat-välilehdeltä</div></div></div>;
+  return(
+    <div>
+      <div className="section-head">Ranking</div>
+      <div className="stat-grid">
+        <div className="stat-box"><div className="stat-val gold">{data.players.length}</div><div className="stat-lbl">Pelaajaa</div></div>
+        <div className="stat-box"><div className="stat-val">{totalMatches}</div><div className="stat-lbl">Ottelua</div></div>
+        <div className="stat-box"><div className="stat-val red">{unpaid}</div><div className="stat-lbl">Maksamatta</div></div>
+      </div>
+      <div className="card">
+        <div className="card-title">Kauden sijoitukset · klikkaa profiiliin</div>
+        {ranked.map((p,i)=>{
+          const s=stats[p]||{},pct=s.games?Math.round(s.wins/s.games*100):0;
+          const trend=computeMonthlyTrend(p,data.matches);
+          return(
+            <div key={p} className="rank-item clickable" onClick={()=>setSel(p)}>
+              <div className="rank-num">{i===0?"🥇":i===1?"🥈":i===2?"🥉":i+1}</div>
+              <div style={{flex:1}}><div className="rank-name">{p}</div><div className="rank-stats">{s.wins||0}V – {s.losses||0}H · {s.games||0} peliä</div></div>
+              <Sparkline data={trend} width={60} height={28}/>
+              <div className="rank-winpct" style={{marginLeft:8}}>{s.games?pct+"%":"–"}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="card">
+        <div className="card-title">Olutvelat – historiakooste</div>
+        {[...data.players].sort((a,b)=>(allTime[b]?.debt||0)-(allTime[a]?.debt||0)).slice(0,5).map(p=>{
+          const s=allTime[p]||{},net=(s.received||0)-(s.debt||0);
+          return(
+            <div key={p} className="rank-item clickable" onClick={()=>setSel(p)}>
+              <div className="rank-name" style={{flex:1}}>{p}</div>
+              <span className="tag tag-red">-{s.debt||0} 🍺</span>
+              <span style={{marginLeft:6,fontSize:13,fontWeight:600}} className={net>=0?"net-pos":"net-neg"}>{net>=0?"+":""}{net}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Player Profile ────────────────────────────────────────────────────────────
+function PlayerProfile({player,data,stats,onBack}){
+  const s=stats[player]||{},pct=s.games?Math.round(s.wins/s.games*100):0;
+  const ranked=rankPlayers(data.players,stats),rank=ranked.indexOf(player)+1;
+  const trend=computeMonthlyTrend(player,data.matches);
+  const partnerStats=computePartnerStats(player,data.matches);
+  const oppStats=computeOpponentStats(player,data.matches);
+  const partners=Object.entries(partnerStats).filter(([,v])=>v.games>0).sort((a,b)=>(b[1].wins/b[1].games)-(a[1].wins/a[1].games));
+  const opponents=Object.entries(oppStats).filter(([,v])=>v.games>0).sort((a,b)=>(b[1].wins/b[1].games)-(a[1].wins/a[1].games));
+  const myMatches=data.matches.filter(m=>m.winner&&[m.a1,m.a2,m.b1,m.b2].includes(player)).sort((a,b)=>(b.date||"").localeCompare(a.date||"")).slice(0,5);
+  return(
+    <div>
+      <button onClick={onBack} style={{background:"none",border:"none",color:"var(--text2)",cursor:"pointer",display:"flex",alignItems:"center",gap:6,marginBottom:14,fontSize:14}}>
+        <Icon name="back" size={18}/> Takaisin rankingiin
+      </button>
+      <div className="profile-hero">
+        <div className="profile-avatar">{player.charAt(0).toUpperCase()}</div>
+        <div><div className="profile-name">{player}</div><div className="profile-rank">Sija {rank} · {s.wins||0}V {s.losses||0}H</div></div>
+        <div style={{marginLeft:"auto",textAlign:"right"}}>
+          <div style={{fontFamily:"Syne,sans-serif",fontWeight:800,fontSize:28,color:pct>=50?"var(--green)":"var(--red)"}}>{s.games?pct+"%":"–"}</div>
+          <div style={{fontSize:11,color:"var(--text2)"}}>voitto-%</div>
+        </div>
+      </div>
+      <div className="stat-grid">
+        <div className="stat-box"><div className="stat-val">{s.games||0}</div><div className="stat-lbl">Pelit</div></div>
+        <div className="stat-box"><div className="stat-val green">{s.wins||0}</div><div className="stat-lbl">Voitot</div></div>
+        <div className="stat-box"><div className="stat-val red">{s.losses||0}</div><div className="stat-lbl">Häviöt</div></div>
+      </div>
+      <div className="card">
+        <div className="card-title">Kuukausitrendit (voitto-%)</div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",gap:4}}>
+          {trend.map((mo,i)=>{
+            const pm=mo.games>0?mo.wins/mo.games:null,bH=pm!==null?Math.max(4,Math.round(pm*56)):4,has=mo.games>0;
+            return(
+              <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+                {has&&<div style={{fontSize:10,color:"var(--text2)",fontWeight:600}}>{mo.wins}/{mo.games}</div>}
+                <div style={{width:"100%",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"flex-end",height:60}}>
+                  <div style={{width:"70%",height:bH,background:!has?"var(--surface2)":pm>=0.5?"var(--green)":"var(--red)",borderRadius:3,opacity:has?1:0.3}}/>
+                </div>
+                <div style={{fontSize:9,color:"var(--text3)",textTransform:"uppercase"}}>{mo.label}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {partners.length>0&&(
+        <div className="card">
+          <div className="card-title">Paritilastot</div>
+          <div className="duo-table">
+            {partners.map(([pt,v])=>{
+              const p=v.games>0?Math.round(v.wins/v.games*100):0;
+              return <div key={pt} className="duo-row"><div className="duo-name">{pt}</div><div className="duo-bar-wrap"><div className="duo-bar" style={{width:p+"%"}}/></div><div className="duo-pct" style={{color:p>=50?"var(--green)":"var(--red)"}}>{p}%</div><div className="duo-games">{v.wins}V/{v.games}</div></div>;
+            })}
+          </div>
+        </div>
+      )}
+      {opponents.length>0&&(
+        <div className="card">
+          <div className="card-title">Vastustajatilastot</div>
+          <div className="duo-table">
+            {opponents.map(([opp,v])=>{
+              const p=v.games>0?Math.round(v.wins/v.games*100):0;
+              return <div key={opp} className="duo-row"><div className="duo-name">{opp}</div><div className="duo-bar-wrap"><div className={`duo-bar ${p<50?"red":""}`} style={{width:p+"%"}}/></div><div className="duo-pct" style={{color:p>=50?"var(--green)":"var(--red)"}}>{p}%</div><div className="duo-games">{v.wins}V/{v.games}</div></div>;
+            })}
+          </div>
+        </div>
+      )}
+      {myMatches.length>0&&(
+        <div className="card">
+          <div className="card-title">Viimeiset ottelut</div>
+          {myMatches.map(m=>{
+            const mt=[m.a1,m.a2].includes(player)?"A":"B",won=m.winner===mt;
+            const partner=(mt==="A"?[m.a1,m.a2]:[m.b1,m.b2]).find(p=>p!==player);
+            const opps=(mt==="A"?[m.b1,m.b2]:[m.a1,m.a2]).join(" & ");
+            return(
+              <div key={m.id} className="duo-row">
+                <div style={{flex:1}}><div style={{fontSize:13,fontWeight:500}}><span style={{color:"var(--text2)"}}>& {partner}</span> vs {opps}</div><div style={{fontSize:11,color:"var(--text3)"}}>{fmt(m.date)}</div></div>
+                <span className={`tag ${won?"tag-green":"tag-red"}`}>{won?"Voitto":"Häviö"}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Match Form ────────────────────────────────────────────────────────────────
+function MatchForm({initial,pOpts,onSave,onCancel,title}){
+  const [form,setForm]=useState(initial);
+  const [err,setErr]=useState("");
+  const sel=(f,v)=>setForm(p=>({...p,[f]:v}));
+  function submit(){
+    if(!form.a1||!form.a2||!form.b1||!form.b2){setErr("Valitse kaikki pelaajat");return;}
+    if(!form.winner){setErr("Valitse voittajapari");return;}
+    if(new Set([form.a1,form.a2,form.b1,form.b2]).size<4){setErr("Sama pelaaja ei voi olla kahdessa parissa");return;}
+    onSave(form);
+  }
+  return(
+    <div className="card" style={{marginBottom:16}}>
+      <div className="card-title">{title}</div>
+      <div className="form-group"><label className="form-label">Päivämäärä</label><input className="form-input" type="date" value={form.date} onChange={e=>sel("date",e.target.value)}/></div>
+      <div className="form-group"><label className="form-label">Pari A</label><div className="form-grid-2">
+        <select className="form-input form-select" value={form.a1} onChange={e=>sel("a1",e.target.value)}><option value="">Pelaaja 1</option>{pOpts.map(p=><option key={p} value={p}>{p}</option>)}</select>
+        <select className="form-input form-select" value={form.a2} onChange={e=>sel("a2",e.target.value)}><option value="">Pelaaja 2</option>{pOpts.map(p=><option key={p} value={p}>{p}</option>)}</select>
+      </div></div>
+      <div className="form-group"><label className="form-label">Pari B</label><div className="form-grid-2">
+        <select className="form-input form-select" value={form.b1} onChange={e=>sel("b1",e.target.value)}><option value="">Pelaaja 1</option>{pOpts.map(p=><option key={p} value={p}>{p}</option>)}</select>
+        <select className="form-input form-select" value={form.b2} onChange={e=>sel("b2",e.target.value)}><option value="">Pelaaja 2</option>{pOpts.map(p=><option key={p} value={p}>{p}</option>)}</select>
+      </div></div>
+      <div className="form-group"><label className="form-label">Voittaja</label>
+        <div className="winner-toggle">
+          <div className={`winner-opt A ${form.winner==="A"?"selected":""}`} onClick={()=>sel("winner","A")}>Pari A voitti{form.a1&&form.a2?<><br/><small>{form.a1} & {form.a2}</small></>:""}</div>
+          <div className={`winner-opt B ${form.winner==="B"?"selected":""}`} onClick={()=>sel("winner","B")}>Pari B voitti{form.b1&&form.b2?<><br/><small>{form.b1} & {form.b2}</small></>:""}</div>
+        </div>
+      </div>
+      {err&&<div style={{color:"var(--red)",fontSize:13,marginBottom:10}}>{err}</div>}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        <button className="btn btn-secondary" onClick={onCancel}><Icon name="x" size={15}/> Peruuta</button>
+        <button className="btn btn-primary" onClick={submit} disabled={pOpts.length<4}><Icon name="check" size={15}/> Tallenna</button>
+      </div>
+      {pOpts.length<4&&<div style={{color:"var(--text2)",fontSize:12,marginTop:8,textAlign:"center"}}>Lisää vähintään 4 pelaajaa ensin</div>}
+    </div>
+  );
+}
+
+// ── Matches Tab ───────────────────────────────────────────────────────────────
+function MatchesTab({data,setData,showToast}){
+  const [showAdd,setShowAdd]=useState(false);
+  const [editId,setEditId]=useState(null);
+  const pOpts=data.players;
+  const emptyForm={date:new Date().toISOString().slice(0,10),a1:"",a2:"",b1:"",b2:"",winner:""};
+  function addMatch(form){setData(d=>({...d,matches:[{id:uid(),...form},...d.matches]}));setShowAdd(false);showToast("Ottelu lisätty ✓");}
+  function saveEdit(form){setData(d=>({...d,matches:d.matches.map(m=>m.id===editId?{...m,...form}:m)}));setEditId(null);showToast("Ottelu päivitetty ✓");}
+  function deleteMatch(id){setData(d=>({...d,matches:d.matches.filter(m=>m.id!==id)}));showToast("Ottelu poistettu");}
+  function getBeerInfo(m){
+    if(!m.winner)return null;
+    const w=m.winner==="A"?[m.a1,m.a2]:[m.b1,m.b2],l=m.winner==="A"?[m.b1,m.b2]:[m.a1,m.a2],s=seedForMatch(m);
+    return{loser1:l[0],loser2:l[1],h1pays:s%2===0?w[0]:w[1],h2pays:s%2===0?w[1]:w[0]};
+  }
+  function togglePaid(id,field){setData(d=>({...d,matches:d.matches.map(m=>m.id===id?{...m,[field]:!m[field]}:m)}));}
+  const sorted=[...data.matches].sort((a,b)=>{if(!a.date&&!b.date)return 0;if(!a.date)return 1;if(!b.date)return -1;return b.date.localeCompare(a.date);});
+  return(
+    <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+        <div className="section-head" style={{marginBottom:0}}>Ottelut</div>
+        <button className="btn btn-primary" style={{width:"auto",padding:"8px 14px",fontSize:13}} onClick={()=>{setShowAdd(s=>!s);setEditId(null);}}>
+          <Icon name={showAdd?"x":"plus"} size={16}/>{showAdd?"Peruuta":"Lisää"}
+        </button>
+      </div>
+      {showAdd&&<MatchForm initial={emptyForm} pOpts={pOpts} title="Uusi ottelu" onSave={addMatch} onCancel={()=>setShowAdd(false)}/>}
+      {sorted.length===0?<div className="empty"><div className="empty-icon"><Icon name="golf" size={40}/></div><div className="empty-text">Ei otteluja vielä</div></div>:
+        sorted.map(m=>{
+          const beer=getBeerInfo(m),wA=m.winner==="A",isEdit=editId===m.id;
+          if(isEdit) return <MatchForm key={m.id} initial={{date:m.date,a1:m.a1,a2:m.a2,b1:m.b1,b2:m.b2,winner:m.winner}} pOpts={pOpts} title="Muokkaa ottelua" onSave={saveEdit} onCancel={()=>setEditId(null)}/>;
+          return(
+            <div key={m.id} className="match-item">
+              <div className="match-header">
+                <span className="match-date">{fmt(m.date)}</span>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  {m.winner&&<span className={`match-winner-badge ${m.winner}`}>Pari {m.winner} voitti</span>}
+                  <button style={{background:"none",border:"none",color:"var(--blue)",cursor:"pointer",padding:2}} onClick={()=>{setEditId(m.id);setShowAdd(false);}}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                  </button>
+                  <button style={{background:"none",border:"none",color:"var(--text3)",cursor:"pointer",padding:2}} onClick={()=>deleteMatch(m.id)}><Icon name="trash" size={14}/></button>
+                </div>
+              </div>
+              <div className="match-teams">
+                <div className={`match-team ${wA?"winner":""}`}><div className="match-team-label">Pari A</div><div className="match-team-names">{m.a1}<br/>{m.a2}</div></div>
+                <div className="match-vs">VS</div>
+                <div className={`match-team ${!wA&&m.winner?"winner":""}`}><div className="match-team-label">Pari B</div><div className="match-team-names">{m.b1}<br/>{m.b2}</div></div>
+              </div>
+              {beer&&(
+                <div className="match-beer">
+                  <div className="beer-row"><div className="beer-text"><strong>{beer.loser1}</strong> → {beer.h1pays}</div><button className={`beer-btn ${m.paidH1?"paid":""}`} onClick={()=>togglePaid(m.id,"paidH1")}><Icon name={m.paidH1?"check":"beer"} size={14}/></button></div>
+                  <div className="beer-row"><div className="beer-text"><strong>{beer.loser2}</strong> → {beer.h2pays}</div><button className={`beer-btn ${m.paidH2?"paid":""}`} onClick={()=>togglePaid(m.id,"paidH2")}><Icon name={m.paidH2?"check":"beer"} size={14}/></button></div>
+                </div>
+              )}
+            </div>
+          );
+        })
+      }
+    </div>
+  );
+}
+
+// ── Beers Tab ─────────────────────────────────────────────────────────────────
+function BeersTab({data,setData,showToast,stats}){
+  function getBeer(m){
+    if(!m.winner)return null;
+    const w=m.winner==="A"?[m.a1,m.a2]:[m.b1,m.b2],l=m.winner==="A"?[m.b1,m.b2]:[m.a1,m.a2],s=seedForMatch(m);
+    return{loser1:l[0],loser2:l[1],h1pays:s%2===0?w[0]:w[1],h2pays:s%2===0?w[1]:w[0]};
+  }
+  function markAllPaid(name){
+    setData(d=>({...d,matches:d.matches.map(m=>{const b=getBeer(m);if(!b)return m;let u={...m};if(b.loser1===name&&!m.paidH1)u.paidH1=true;if(b.loser2===name&&!m.paidH2)u.paidH2=true;return u;})}));
+    showToast(`${name} merkitty maksetuksi ✓`);
+  }
+  const sorted=[...data.players].sort((a,b)=>(stats[b]?.debt||0)-(stats[a]?.debt||0));
+  return(
+    <div>
+      <div className="section-head">Olutvelat</div>
+      <p className="section-sub">Maksamattomat oluet kaudelta</p>
+      {data.players.length===0?<div className="empty"><div className="empty-icon"><Icon name="beer" size={40}/></div><div className="empty-text">Ei pelaajia</div></div>:(
+        <div className="card">
+          <table className="beer-table">
+            <thead><tr><th>Pelaaja</th><th style={{textAlign:"center"}}>Velkaa</th><th style={{textAlign:"center"}}>Saanut</th><th style={{textAlign:"center"}}>Netto</th><th></th></tr></thead>
+            <tbody>
+              {sorted.map(p=>{
+                const s=stats[p]||{},debt=s.debt||0,recv=s.received||0,net=recv-debt;
+                return(
+                  <tr key={p}>
+                    <td style={{fontWeight:500}}>{p}</td>
+                    <td style={{textAlign:"center"}}>{debt>0?<span className="debt-badge">-{debt} 🍺</span>:<span style={{color:"var(--text3)"}}>–</span>}</td>
+                    <td style={{textAlign:"center"}}>{recv>0?<span className="recv-badge">+{recv} 🍺</span>:<span style={{color:"var(--text3)"}}>–</span>}</td>
+                    <td style={{textAlign:"center"}} className={net>0?"net-pos":net<0?"net-neg":""}>{net===0?"–":(net>0?"+":"")+net}</td>
+                    <td>{debt>0&&<button className="btn btn-secondary" style={{width:"auto",padding:"4px 10px",fontSize:12}} onClick={()=>markAllPaid(p)}><Icon name="check" size={12}/> Maksettu</button>}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {data.matches.filter(m=>m.winner&&(!m.paidH1||!m.paidH2)).length>0&&(
+        <div>
+          <div className="card-title" style={{padding:"8px 0"}}>Maksamattomat ottelut</div>
+          {data.matches.filter(m=>m.winner&&(!m.paidH1||!m.paidH2)).map(m=>{
+            const b=getBeer(m);if(!b)return null;
+            return(
+              <div key={m.id} className="match-item">
+                <div className="match-date" style={{marginBottom:8}}>{fmt(m.date)} · Pari {m.winner} voitti</div>
+                <div className="match-beer" style={{marginTop:0,paddingTop:0,borderTop:"none"}}>
+                  {!m.paidH1&&<div className="beer-row"><div className="beer-text"><strong>{b.loser1}</strong> → {b.h1pays}</div><button className="beer-btn" onClick={()=>setData(d=>({...d,matches:d.matches.map(x=>x.id===m.id?{...x,paidH1:true}:x)}))}><Icon name="check" size={14}/></button></div>}
+                  {!m.paidH2&&<div className="beer-row"><div className="beer-text"><strong>{b.loser2}</strong> → {b.h2pays}</div><button className="beer-btn" onClick={()=>setData(d=>({...d,matches:d.matches.map(x=>x.id===m.id?{...x,paidH2:true}:x)}))}><Icon name="check" size={14}/></button></div>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Players Tab ───────────────────────────────────────────────────────────────
+function PlayersTab({data,setData,showToast}){
+  const [name,setName]=useState(""),[ err,setErr]=useState("");
+  function addPlayer(){
+    const n=name.trim();
+    if(!n){setErr("Syötä nimi");return;}
+    if(data.players.includes(n)){setErr("Pelaaja on jo listalla");return;}
+    if(data.players.length>=10){setErr("Maksimi 10 pelaajaa");return;}
+    setData(d=>({...d,players:[...d.players,n]}));setName("");setErr("");showToast(`${n} lisätty ✓`);
+  }
+  function removePlayer(p){
+    if(data.matches.some(m=>[m.a1,m.a2,m.b1,m.b2].includes(p))){showToast("Poista ensin pelaajan ottelut");return;}
+    setData(d=>({...d,players:d.players.filter(x=>x!==p)}));showToast(`${p} poistettu`);
+  }
+  return(
+    <div>
+      <div className="section-head">Pelaajat</div>
+      <div className="card">
+        <div className="card-title">Lisää pelaaja ({data.players.length}/10)</div>
+        <div style={{display:"flex",gap:8}}>
+          <input className="form-input" placeholder="Nimi..." value={name} onChange={e=>{setName(e.target.value);setErr("");}} onKeyDown={e=>e.key==="Enter"&&addPlayer()} maxLength={30}/>
+          <button className="btn btn-primary" style={{width:"auto",padding:"10px 16px"}} onClick={addPlayer} disabled={data.players.length>=10}><Icon name="plus" size={18}/></button>
+        </div>
+        {err&&<div style={{color:"var(--red)",fontSize:13,marginTop:8}}>{err}</div>}
+      </div>
+      {data.players.length===0?<div className="empty"><div className="empty-icon"><Icon name="users" size={40}/></div><div className="empty-text">Ei pelaajia vielä</div></div>:(
+        <div className="card">
+          <div className="card-title">Pelaajat</div>
+          {data.players.map(p=>(
+            <div key={p} className="player-chip">
+              <span className="player-chip-name">{p}</span>
+              <button className="player-chip-del" onClick={()=>removePlayer(p)}><Icon name="x" size={16}/></button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
